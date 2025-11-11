@@ -1,0 +1,437 @@
+# Docker Compose for Personal Finance Manager - FIXED VERSION
+# All services properly configured + Chat Service + Fixed PostgreSQL healthcheck
+
+x-base-service: &base-service
+  depends_on:
+    postgres:
+      condition: service_healthy
+    redis:
+      condition: service_healthy
+    rabbitmq:
+      condition: service_healthy
+  networks:
+    - pfm-network
+  env_file:
+    - .env
+  restart: unless-stopped
+
+services:
+  # --- Databases & Caches ---
+  postgres:
+    image: postgres:15-alpine
+    container_name: pfm-postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-pfm_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-secure_password_123}
+      POSTGRES_DB: ${POSTGRES_DB:-pfm_database}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./scripts/init_db.sql:/docker-entrypoint-initdb.d/init.sql
+    networks:
+      - pfm-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-pfm_user} -d ${POSTGRES_DB:-pfm_database}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: pfm-redis
+    command: redis-server --requirepass ${REDIS_PASSWORD:-redis_secure_pass}
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - pfm-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-redis_secure_pass}", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:latest
+    container_name: pfm-clickhouse
+    ports:
+      - "8123:8123"
+      - "9000:9000"
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse
+    networks:
+      - pfm-network
+    environment:
+      CLICKHOUSE_DB: analytics
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "localhost:8123/ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # --- Vector DB (Milvus) ---
+  etcd:
+    image: quay.io/coreos/etcd:v3.5.5
+    container_name: pfm-etcd
+    environment:
+      - ETCD_AUTO_COMPACTION_MODE=revision
+      - ETCD_AUTO_COMPACTION_RETENTION=1000
+      - ETCD_QUOTA_BACKEND_BYTES=4294967296
+      - ETCD_SNAPSHOT_COUNT=50000
+    volumes:
+      - etcd_data:/etcd
+    command: etcd -advertise-client-urls=http://127.0.0.1:2379 -listen-client-urls http://0.0.0.0:2379 --data-dir /etcd
+    networks:
+      - pfm-network
+
+  minio:
+    image: minio/minio:latest
+    container_name: pfm-minio-storage
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:-minioadmin}
+    ports:
+      - "9001:9001"
+      - "9010:9000"
+    volumes:
+      - minio_data:/minio_data
+    command: minio server /minio_data --console-address ":9001"
+    networks:
+      - pfm-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+
+  milvus:
+    image: milvusdb/milvus:v2.3.3
+    container_name: pfm-milvus
+    depends_on:
+      - etcd
+      - minio
+    environment:
+      ETCD_ENDPOINTS: etcd:2379
+      MINIO_ADDRESS: minio:9000
+    ports:
+      - "19530:19530"
+      - "9091:9091"
+    volumes:
+      - milvus_data:/var/lib/milvus
+    networks:
+      - pfm-network
+    command: ["milvus", "run", "standalone"]
+
+  # --- Message Queue ---
+  rabbitmq:
+    image: rabbitmq:3-management-alpine
+    container_name: pfm-rabbitmq
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-pfm_queue}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:-queue_password}
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    networks:
+      - pfm-network
+    healthcheck:
+      test: rabbitmq-diagnostics -q ping
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # --- API Gateway (Kong) ---
+  kong-database:
+    image: postgres:15-alpine
+    container_name: pfm-kong-db
+    environment:
+      POSTGRES_USER: kong
+      POSTGRES_DB: kong
+      POSTGRES_PASSWORD: kong_pass
+    volumes:
+      - kong_data:/var/lib/postgresql/data
+    networks:
+      - pfm-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U kong -d kong"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  kong-migrations:
+    image: kong:3.4
+    container_name: pfm-kong-migrations
+    command: kong migrations bootstrap
+    depends_on:
+      kong-database:
+        condition: service_healthy
+    environment:
+      KONG_DATABASE: postgres
+      KONG_PG_HOST: kong-database
+      KONG_PG_USER: kong
+      KONG_PG_PASSWORD: kong_pass
+    networks:
+      - pfm-network
+    restart: on-failure
+
+  kong:
+    image: kong:3.4
+    container_name: pfm-kong-gateway
+    depends_on:
+      - kong-migrations
+    environment:
+      KONG_DATABASE: postgres
+      KONG_PG_HOST: kong-database
+      KONG_PG_USER: kong
+      KONG_PG_PASSWORD: kong_pass
+      KONG_PROXY_ACCESS_LOG: /dev/stdout
+      KONG_ADMIN_ACCESS_LOG: /dev/stdout
+      KONG_PROXY_ERROR_LOG: /dev/stderr
+      KONG_ADMIN_ERROR_LOG: /dev/stderr
+      KONG_ADMIN_LISTEN: 0.0.0.0:8001
+    ports:
+      - "8000:8000"
+      - "8443:8443"
+      - "8444:8444"
+    networks:
+      - pfm-network
+    healthcheck:
+      test: ["CMD", "kong", "health"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+
+  # --- Microservices ---
+  auth-service:
+    <<: *base-service
+    build:
+      context: ./services/auth-service
+      dockerfile: Dockerfile
+    container_name: pfm-auth-service
+    environment:
+      - SERVICE_NAME=auth-service
+      - SERVICE_PORT=8101
+    ports:
+      - "8101:8101"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8101/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  user-service:
+    <<: *base-service
+    build:
+      context: ./services/user-service
+      dockerfile: Dockerfile
+    container_name: pfm-user-service
+    environment:
+      - SERVICE_NAME=user-service
+      - SERVICE_PORT=8102
+    ports:
+      - "8102:8102"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8102/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  transaction-service:
+    <<: *base-service
+    build:
+      context: ./services/transaction-service
+      dockerfile: Dockerfile
+    container_name: pfm-transaction-service
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+    environment:
+      - SERVICE_NAME=transaction-service
+      - SERVICE_PORT=8103
+    ports:
+      - "8103:8103"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8103/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  budget-service:
+    <<: *base-service
+    build:
+      context: ./services/budget-service
+      dockerfile: Dockerfile
+    container_name: pfm-budget-service
+    environment:
+      - SERVICE_NAME=budget-service
+      - SERVICE_PORT=8104
+    ports:
+      - "8104:8104"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8104/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  investment-service:
+    <<: *base-service
+    build:
+      context: ./services/investment-service
+      dockerfile: Dockerfile
+    container_name: pfm-investment-service
+    environment:
+      - SERVICE_NAME=investment-service
+      - SERVICE_PORT=8105
+    ports:
+      - "8105:8105"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8105/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  debt-service:
+    <<: *base-service
+    build:
+      context: ./services/debt-service
+      dockerfile: Dockerfile
+    container_name: pfm-debt-service
+    environment:
+      - SERVICE_NAME=debt-service
+      - SERVICE_PORT=8106
+    ports:
+      - "8106:8106"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8106/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  analytics-service:
+    <<: *base-service
+    build:
+      context: ./services/analytics-service
+      dockerfile: Dockerfile
+    container_name: pfm-analytics-service
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+    environment:
+      - SERVICE_NAME=analytics-service
+      - SERVICE_PORT=8107
+    ports:
+      - "8107:8107"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8107/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  notification-service:
+    <<: *base-service
+    build:
+      context: ./services/notification-service
+      dockerfile: Dockerfile
+    container_name: pfm-notification-service
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      - SERVICE_NAME=notification-service
+      - SERVICE_PORT=8108
+    ports:
+      - "8108:8108"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8108/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  ai-ml-service:
+    <<: *base-service
+    build:
+      context: ./services/ai-ml-service
+      dockerfile: Dockerfile
+    container_name: pfm-ai-ml-service
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      milvus:
+        condition: service_started
+    environment:
+      - SERVICE_NAME=ai-ml-service
+      - SERVICE_PORT=8109
+    ports:
+      - "8109:8109"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8109/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  chat-service:
+    <<: *base-service
+    build:
+      context: ./services/chat-service
+      dockerfile: Dockerfile
+    container_name: pfm-chat-service
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      milvus:
+        condition: service_started
+    environment:
+      - SERVICE_NAME=chat-service
+      - SERVICE_PORT=8110
+      - AI_ML_SERVICE_URL=http://ai-ml-service:8109
+    ports:
+      - "8110:8110"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8110/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+networks:
+  pfm-network:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  redis_data:
+  clickhouse_data:
+  etcd_data:
+  minio_data:
+  milvus_data:
+  rabbitmq_data:
+  kong_data:

@@ -1,0 +1,29 @@
+groups:
+  - name: service_alerts
+    rules:
+      - alert: ServiceDown
+        expr: up == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Service {{ $labels.job }} is down"
+          description: "{{ $labels.instance }} of job {{ $labels.job }} has been down for more than 1 minute."
+
+      - alert: HighErrorRate
+        expr: (sum(rate(http_server_requests_seconds_count{status=~"5.."}[5m])) by (job)) / (sum(rate(http_server_requests_seconds_count[5m])) by (job)) > 0.05
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High 5xx error rate on {{ $labels.job }}"
+          description: "{{ $labels.job }} is experiencing more than 5% 5xx errors."
+      
+      - alert: HighLatency
+        expr: (histogram_quantile(0.95, sum(rate(http_server_requests_seconds_bucket[5m])) by (le, job))) > 1.0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High 95th percentile latency on {{ $labels.job }}"
+          description: "P95 latency for {{ $labels.job }} is over 1 second."
