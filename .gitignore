@@ -1,47 +1,89 @@
-# Python
+# =========================
+# 🐍 PYTHON
+# =========================
 __pycache__/
 *.py[cod]
 *.egg-info/
 *.egg
 *.pyo
 *.pyd
+*.whl
 
-# Environments
+# =========================
+# 🧱 ENVIRONMENTS
+# =========================
 venv/
 env/
 .venv/
+ENV/
+env.bak/
+venv.bak/
 
-# IDEs
-.vscode/
-.idea/
-
-# OS
-.DS_Store
-
-# Bytecode & cache
-*.log
-*.out
-*.tmp
-*.swp
-
-# Docker
-*.pid
-*.sock
-*.tar
-*.raw
-
-# Build & dist
-build/
-dist/
-*.egg-info/
-
-# Notebooks & datasets
-*.ipynb_checkpoints/
-data/
-datasets/
-
-# Models & large binaries
+# =========================
+# 🧠 MODELS & LARGE FILES
+# =========================
 *.pt
 *.pth
 *.h5
 *.ckpt
+*.dylib
+*.raw
+*.tar
+*.zip
+*.gz
+
+# =========================
+# 🧰 BUILD & DIST
+# =========================
+build/
+dist/
+*.egg-info/
+pip-wheel-metadata/
+
+# =========================
+# 📊 NOTEBOOKS & DATASETS
+# =========================
+*.ipynb_checkpoints/
+data/
+datasets/
+notebooks/
+logs/
+
+# =========================
+# 🐳 DOCKER
+# =========================
+*.pid
+*.sock
+*.raw
+*.tar
+*.tmp
+docker-compose.override.yml
+
+# =========================
+# 🧠 CONFIG & ENV FILES
+# =========================
+.env
+.env.*
+*.ini
+*.cfg
+*.conf
+secrets.json
+
+# =========================
+# 🧑‍💻 IDEs & OS
+# =========================
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# =========================
+# 🧩 TESTING
+# =========================
+.coverage
+*.cover
+htmlcov/
+.tox/
+.pytest_cache/
+nosetests.xml
+coverage.xml
