@@ -1,0 +1,47 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.egg
+*.pyo
+*.pyd
+
+# Environments
+venv/
+env/
+.venv/
+
+# IDEs
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+
+# Bytecode & cache
+*.log
+*.out
+*.tmp
+*.swp
+
+# Docker
+*.pid
+*.sock
+*.tar
+*.raw
+
+# Build & dist
+build/
+dist/
+*.egg-info/
+
+# Notebooks & datasets
+*.ipynb_checkpoints/
+data/
+datasets/
+
+# Models & large binaries
+*.pt
+*.pth
+*.h5
+*.ckpt
